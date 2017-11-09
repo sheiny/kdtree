@@ -26,6 +26,7 @@ namespace bgm = bg::model;
 namespace bacc = boost::accumulators;
 
 typedef bgm::d2::point_xy<double> Point;
+typedef bgm::box<Point> Range;
 
 typedef bacc::accumulator_set < size_t, bacc::stats <bacc::tag::mean, bacc::tag::min,
     bacc::tag::max, bacc::tag::variance, bacc::tag::median, bacc::tag::sum, bacc::tag::count>> TimeAccumulator;
@@ -82,9 +83,9 @@ protected:
      virtual void SetUp() {
         randomPoints(m_point_count, m_points);
         for (size_t i = 0; i < m_points.size(); i++) {
-            m_tree.add(&m_points[i], &m_points[i]); // No insert, just adding
+            m_tree.add(m_points[i], &m_points[i]); // No insert, just adding
         }
-        m_tree.build(); // Bulk build
+        m_tree.build(Range(Point(-10,-10), Point(10,10))); // Bulk build
     }
     virtual void TearDown() {
         m_tree.clear();
@@ -111,7 +112,7 @@ TEST_F(KdTreeTest, identical_iterative_and_recursive_results) {
         const Point query = RandomPoint();
         auto recursive_result = m_tree.nearest_recursive(query);
         auto iterative_result = m_tree.nearest_iterative(query);
-        bool identical = bg::equals(*recursive_result, *iterative_result);
+        bool identical = bg::equals(recursive_result, *iterative_result);
         EXPECT_TRUE(recursive_result != NULL);
         EXPECT_TRUE(identical) << bg::dsv(*recursive_result) << " != "<< bg::dsv(*iterative_result);
     }
@@ -181,16 +182,38 @@ TEST_F(KdTreeTest, check_knearest_results) {
 TEST(WikipediaExample, test) {
     std::vector<Point> points = {{2, 3}, {5, 4}, {9, 6}, {4, 7}, {8, 1}, {7,2}};
     kdtree<Point> tree;
+    tree.reserve(points.size());
     for (size_t i = 0; i < points.size(); i++) {
-        tree.add(&points[i], &points[i]);
+        tree.add(points[i], &points[i]);
     }
-    tree.build();
+    tree.build(Range(Point(0,0), Point(10, 10)));
     const Point query(5, 6);
     const Point *nearest = tree.nearest_recursive(query);
     const Point expected_result(4, 7);
     bool identical = bg::equals(*nearest, expected_result);
     EXPECT_TRUE(nearest != NULL);
     EXPECT_TRUE(identical) << bg::dsv(*nearest) << " != " << bg::dsv(expected_result);
+}
+
+TEST(RangeSearch, test) {
+    std::vector<Point> points = {{1, 1.5}, {1.5, 3.5}, {2.5, 4.5}, {3, 2}, {3.5, 1.5}, {4.5, 2.5}, {5, 4.5}};
+    kdtree<Point> tree;
+    tree.reserve(points.size());
+    for (size_t i = 0; i < points.size(); i++) {
+        tree.add(points[i], &points[i]);
+    }
+    tree.build(Range(Point(0,0), Point(6, 6)));
+    auto result = tree.range_search(Range(Point(0.5, 0.5), Point(5.5, 5.5)));
+    EXPECT_TRUE(result.size() == 7);
+    result = tree.range_search(Range(Point(0.5, 1), Point(2, 4)));
+    EXPECT_TRUE(result.size() == 2);
+    result = tree.range_search(Range(Point(2.5, 1), Point(5, 3)));
+    EXPECT_TRUE(result.size() == 3);
+    result = tree.range_search(Range(Point(3, 1), Point(4.5, 2.5)));
+    EXPECT_TRUE(result.size() == 1);
+    result = tree.range_search(Range(Point(1, 1), Point(2, 2)));
+    EXPECT_TRUE(result.size() == 0);
+    result = tree.range_search(Range(Point(0, 0), Point(2, 4)));
 }
 
 TEST(DimensionRecursion, subtract) {

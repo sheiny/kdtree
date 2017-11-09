@@ -1,4 +1,4 @@
-#ifndef KDTREE_H_
+﻿#ifndef KDTREE_H_
 #define KDTREE_H_
 
 #include <memory>
@@ -6,6 +6,7 @@
 #include <queue>
 #include <boost/geometry.hpp>
 #include <boost/geometry/geometries/point_xy.hpp>
+#include <boost/geometry/geometries/box.hpp>
 
 namespace spatial_index {
 
@@ -35,20 +36,25 @@ typename boost::geometry::default_distance_result<Point>::type subtract(const Po
 
 } // namespace util
 
-template <typename Data, typename Point = boost::geometry::model::d2::point_xy<double>>
+template <typename Data, typename Point = boost::geometry::model::d2::point_xy<double>, typename Range = boost::geometry::model::box<Point>>
 class kdtree {
 public:
     kdtree() {}
     virtual ~kdtree() {}
-    void add(const Point *point, const Data *data) {
+
+    void reserve(const std::size_t size){
+        m_nodes.reserve(size);
+    }
+
+    void add(const Point point, const Data *data) {
         typename kdnode::ptr node = std::make_shared<kdnode>(point, data);
         m_nodes.push_back(node);
     }
-    void build() {
+    void build(const Range range){
         if (m_nodes.empty()) {
             return;
         }
-        m_root = build(m_nodes, 0);
+        m_root = build(m_nodes, 0, range);
     }
     void clear() {
         m_root.reset();
@@ -90,8 +96,8 @@ public:
             }
             pq.pop();
             auto currentNode = current.second;
-            double d = boost::geometry::comparable_distance(query, *currentNode->split); // no sqrt
-            double dx = util::subtract(query, *currentNode->split, currentNode->axis);
+            double d = boost::geometry::comparable_distance(query, currentNode->split); // no sqrt
+            double dx = util::subtract(query, currentNode->split, currentNode->axis);
             if (d < best.distance) {
                 best.node = currentNode;
                 best.distance = d;
@@ -103,15 +109,23 @@ public:
         }
         return best.node->data;
     }
+
+    const std::vector<const Data *> range_search(const Range &range) const{
+        std::vector<const Data *> result;
+        range_search(result, m_root, range);
+        return result;
+    }
+
 private:
     struct kdnode {
         typedef std::shared_ptr<kdnode> ptr;
         ptr left;
         ptr right;
         int axis;
-        const Point *split;
+        const Point split;
         const Data *data;
-        kdnode(const Point *g, const Data *d) : axis(0), split(g), data(d) {}
+        Range range;
+        kdnode(const Point g, const Data *d) : axis(0), split(g), data(d) {}
     };
     typedef typename kdnode::ptr node_ptr; // get rid of annoying typename
     typedef std::vector<node_ptr> Nodes;
@@ -135,7 +149,7 @@ private:
     struct Sort : std::binary_function<NODE_TYPE, NODE_TYPE, bool> {
         Sort(std::size_t dim) : m_dimension(dim) {}
         bool operator()(const NODE_TYPE &lhs, const NODE_TYPE &rhs) const {
-            return util::subtract(*lhs->split, *rhs->split, m_dimension) < 0;
+            return util::subtract(lhs->split, rhs->split, m_dimension) < 0;
         }
         std::size_t m_dimension;
     };
@@ -145,7 +159,7 @@ private:
         best_match(const node_ptr &n, double d) : node(n), distance(d) {}
     };
 
-    node_ptr build(Nodes &nodes, int depth) {
+    node_ptr build(Nodes &nodes, int depth, Range range) {
         if (nodes.empty()) {
             return node_ptr();
         }
@@ -154,11 +168,21 @@ private:
         std::nth_element(nodes.begin(), nodes.begin() + median, nodes.end(), Sort<node_ptr>(axis));
         node_ptr node = nodes.at(median);
         node->axis = axis;
+        node->range = range;
+
+        Range leftRange, rightRange;
+        if(axis == 0){
+            leftRange = Range(range.min_corner(), Point(node->split.x(), range.max_corner().y()));
+            rightRange = Range(Point(node->split.x(), range.min_corner().y()), range.max_corner());
+        }else{
+            leftRange = Range(range.min_corner(), Point(range.max_corner().x(), node->split.y()));
+            rightRange = Range(Point(range.min_corner().x(), node->split.y()), range.max_corner());
+        }
 
         Nodes left(nodes.begin(), nodes.begin() + median);
         Nodes right(nodes.begin() + median + 1, nodes.end());
-        node->left = build(left, depth + 1);
-        node->right = build(right, depth + 1);
+        node->left = build(left, depth + 1, leftRange);
+        node->right = build(right, depth + 1, rightRange);
 
         return node;
     }
@@ -167,8 +191,8 @@ private:
         if (!currentNode) {
             return;
         }
-        double d = boost::geometry::comparable_distance(query, *currentNode->split); // no sqrt
-        double dx = util::subtract(query, *currentNode->split, currentNode->axis);
+        double d = boost::geometry::comparable_distance(query, currentNode->split); // no sqrt
+        double dx = util::subtract(query, currentNode->split, currentNode->axis);
         if (d < best.distance) {
             best.node = currentNode;
             best.distance = d;
@@ -186,8 +210,8 @@ private:
         if (!currentNode) {
             return;
         }
-        double d = boost::geometry::comparable_distance(query, *currentNode->split); // no sqrt
-        double dx = util::subtract(query, *currentNode->split, currentNode->axis);
+        double d = boost::geometry::comparable_distance(query, currentNode->split); // no sqrt
+        double dx = util::subtract(query, currentNode->split, currentNode->axis);
         if (result.size() < k or d <= result.top().first) {
             result.push(DistanceTuple(d, currentNode));
             if (result.size() > k) {
@@ -201,6 +225,33 @@ private:
             return;
         }
         knearest(query, far, k, result);
+    }
+
+    void report_subtree(std::vector<const Data *> &result, const node_ptr &currentNode) const {
+        if(currentNode->left.get() != NULL){
+            result.push_back(currentNode->left->data);
+            report_subtree(result, currentNode->left);
+        }
+        if(currentNode->right.get() != NULL){
+            result.push_back(currentNode->right->data);
+            report_subtree(result, currentNode->right);
+        }
+    }
+
+    void range_search(std::vector<const Data *> &result, const node_ptr &currentNode, const Range &searchRange) const{
+        if(boost::geometry::within(currentNode->split, searchRange))
+            result.push_back(currentNode->data);
+        if(boost::geometry::within(currentNode->range, searchRange))
+            report_subtree(result, currentNode);
+        else{
+            auto overlap = boost::geometry::intersects(currentNode->range, searchRange);
+            if(overlap){
+                if(currentNode->left.get() != NULL)
+                    range_search(result, currentNode->left, searchRange);
+                if(currentNode->right.get() != NULL)
+                    range_search(result, currentNode->right, searchRange);
+            }
+        }
     }
 };
 
